@@ -58,6 +58,7 @@ func testEverything(ta TestAccessor, t *testing.T) {
 	testInsertOCSPAndGetUnexpiredOCSP(ta, t)
 	testUpdateOCSPAndGetOCSP(ta, t)
 	testUpsertOCSPAndGetOCSP(ta, t)
+	testGetOCSPBySerial(ta, t)
 }
 
 func testInsertCertificateAndGetCertificate(ta TestAccessor, t *testing.T) {
@@ -489,6 +490,71 @@ func testUpsertOCSPAndGetOCSP(ta TestAccessor, t *testing.T) {
 	if want.Serial != got.Serial || got.Body != "fake body revoked" ||
 		!roughlySameTime(newExpiry, got.Expiry) {
 		t.Errorf("want OCSP %+v, got %+v", want, got)
+	}
+}
+
+// testGetOCSPBySerial covers the lookup convention the OCSP responder relies
+// on: the request's issuer key hash varies with the client's hash algorithm
+// and need not match any stored AKI (records may use the certificate AKI or a
+// vendor-specific convention), so status retrieval must correlate by serial
+// number alone and return every record sharing that serial.
+func testGetOCSPBySerial(ta TestAccessor, t *testing.T) {
+	ta.Truncate()
+
+	serial := "fake serial by-serial"
+	legacy := certdb.OCSPRecord{
+		Serial: serial,
+		AKI:    "legacy-aki-convention",
+		Body:   "fake body legacy",
+		Expiry: time.Now().Add(time.Hour),
+	}
+	vendor := certdb.OCSPRecord{
+		Serial: serial,
+		AKI:    "vendor-aki-convention",
+		Body:   "fake body vendor",
+		Expiry: time.Now().Add(2 * time.Hour),
+	}
+	setupGoodCert(ta, t, legacy)
+	if err := ta.Accessor.InsertOCSP(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := ta.Accessor.InsertOCSP(vendor); err != nil {
+		t.Fatal(err)
+	}
+
+	// A request-side hash projection that matches neither stored convention
+	// must still reach both records through the serial lookup.
+	if rets, err := ta.Accessor.GetOCSP(serial, "sha256-request-hash"); err != nil || len(rets) != 0 {
+		t.Fatalf("exact AKI match should miss, got %d records, err=%v", len(rets), err)
+	}
+
+	rets, err := ta.Accessor.GetOCSPBySerial(serial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rets) != 2 {
+		t.Fatalf("expected both coexisting records, got %d", len(rets))
+	}
+
+	bodies := map[string]bool{}
+	for _, r := range rets {
+		if r.Serial != serial {
+			t.Errorf("unexpected serial %q on record %+v", r.Serial, r)
+		}
+		bodies[r.Body] = true
+	}
+	if !bodies[legacy.Body] || !bodies[vendor.Body] {
+		t.Fatalf("missing stored bodies, got %+v", bodies)
+	}
+
+	// An unknown serial yields no records rather than an error, leaving the
+	// responder to answer unauthorized.
+	rets, err = ta.Accessor.GetOCSPBySerial("unknown serial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rets) != 0 {
+		t.Fatalf("expected no records for unknown serial, got %d", len(rets))
 	}
 }
 

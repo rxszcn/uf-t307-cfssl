@@ -65,6 +65,10 @@ SELECT %s FROM ocsp_responses
 	selectOCSPSQL = `
 SELECT %s FROM ocsp_responses
   WHERE (serial_number = ? AND authority_key_identifier = ?);`
+
+	selectOCSPBySerialSQL = `
+SELECT %s FROM ocsp_responses
+  WHERE serial_number = ?;`
 )
 
 // Accessor implements certdb.Accessor interface.
@@ -313,6 +317,27 @@ func (d *Accessor) GetOCSP(serial, aki string) (ors []certdb.OCSPRecord, err err
 	}
 
 	err = d.db.Select(&ors, fmt.Sprintf(d.db.Rebind(selectOCSPSQL), sqlstruct.Columns(certdb.OCSPRecord{})), serial, aki)
+	if err != nil {
+		return nil, wrapSQLError(err)
+	}
+
+	return ors, nil
+}
+
+// GetOCSPBySerial retrieves every certdb.OCSPRecord matching serial, ignoring
+// the authority key identifier each record was stored under. The serial
+// number is the only OCSP request field independent of the request's hash
+// algorithm, so this is the correlation path an OCSP responder must use to
+// answer SHA-1 and SHA-256 (and SHA-384/SHA-512) CertIDs with the same
+// current record. All records sharing the serial are returned; callers pick
+// the current one (e.g. the record with the furthest-future expiry).
+func (d *Accessor) GetOCSPBySerial(serial string) (ors []certdb.OCSPRecord, err error) {
+	err = d.checkDB()
+	if err != nil {
+		return nil, err
+	}
+
+	err = d.db.Select(&ors, fmt.Sprintf(d.db.Rebind(selectOCSPBySerialSQL), sqlstruct.Columns(certdb.OCSPRecord{})), serial)
 	if err != nil {
 		return nil, wrapSQLError(err)
 	}

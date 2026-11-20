@@ -5,13 +5,19 @@
 // internal to the server, that can be fixed by an administrator. Any type of
 // incorrect input from a user should be logged and Info or below. For things
 // that are logged on every request, Debug is the appropriate level.
+//
+// When the backend is a database (DBSource), status records are correlated by
+// certificate serial number rather than by the request's issuer key hash. An
+// RFC 6960 CertID hashes the issuer public key with whatever hash algorithm
+// the client selected (SHA-1, SHA-256, SHA-384 or SHA-512), while stored
+// records use producer-specific authority key identifier conventions; only
+// the serial number is hash-independent. See DBSource.Response for details.
 package ocsp
 
 import (
 	"crypto"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,12 +92,24 @@ func NewDBSource(dbAccessor certdb.Accessor) Source {
 // Response implements cfssl.ocsp.responder.Source, which returns the
 // OCSP response in the Database for the given request with the expiration
 // date furthest in the future.
+//
+// Lookup is keyed on the certificate serial number alone. Per RFC 6960 the
+// request's IssuerKeyHash is a hash of the issuer public key under whichever
+// hash algorithm the client selected (SHA-1, SHA-256, SHA-384 or SHA-512),
+// so it changes from one client population to another and cannot be matched
+// against a stored AKI: records are written under producer-specific
+// conventions (ocsprefresh stores the certificate's AuthorityKeyId; records
+// imported from vendor CAs use the vendor's convention). The serial number is
+// the only request field independent of the hash algorithm, so all records
+// for the serial are fetched and the current one (furthest-future expiry) is
+// returned. The answer therefore does not vary with the request hash, and a
+// record remains reachable no matter which key identifier convention it was
+// stored under.
 func (src DBSource) Response(req *ocsp.Request) ([]byte, http.Header, error) {
 	if req == nil {
 		return nil, nil, errors.New("called with nil request")
 	}
 
-	aki := hex.EncodeToString(req.IssuerKeyHash)
 	sn := req.SerialNumber
 
 	if sn == nil {
@@ -103,7 +121,7 @@ func (src DBSource) Response(req *ocsp.Request) ([]byte, http.Header, error) {
 		log.Errorf("No DB Accessor")
 		return nil, nil, errors.New("called with nil DB accessor")
 	}
-	records, err := src.Accessor.GetOCSP(strSN, aki)
+	records, err := src.Accessor.GetOCSPBySerial(strSN)
 
 	// Response() logs when there are errors obtaining the OCSP response
 	// and returns nil, false.

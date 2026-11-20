@@ -87,6 +87,12 @@ func ocsprefreshMain(args []string, c cli.Config) error {
 			return err
 		}
 
+		// The record is keyed by the certificate's own authority key
+		// identifier (the producer-side convention). It intentionally does
+		// not derive the AKI from an OCSP request hash: the responder
+		// correlates status records by serial number instead, so clients
+		// using SHA-1, SHA-256, SHA-384 or SHA-512 CertIDs all reach this
+		// same record.
 		err = dbAccessor.UpsertOCSP(cert.SerialNumber.String(), hex.EncodeToString(cert.AuthorityKeyId), string(resp), ocspExpiry)
 		if err != nil {
 			log.Critical("Unable to save OCSP response: ", err)

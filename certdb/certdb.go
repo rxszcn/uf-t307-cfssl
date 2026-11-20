@@ -63,10 +63,28 @@ func (c *CertificateRecord) GetSANs() ([]string, error) {
 
 // OCSPRecord encodes a OCSP response body and its metadata
 // that will be recorded in a database.
+//
+// The AKI field stores the authority key identifier of the issuing CA as a
+// lowercase hex string. It reflects the convention used by the producer of
+// the record (for example ocsprefresh stores
+// hex(certificate.AuthorityKeyId), and records imported from external vendor
+// CAs follow the vendor's own key identifier convention). It is NOT derived
+// from the hash algorithm of an OCSP request: an RFC 6960 CertID carries
+// either a SHA-1, SHA-256, SHA-384 or SHA-512 hash of the issuer public key
+// depending on what the client chose, so none of those projections can be
+// assumed to match a stored AKI. Status lookups therefore correlate records
+// by SerialNumber first; see GetOCSPBySerial.
 type OCSPRecord struct {
-	Serial string    `db:"serial_number"`
-	AKI    string    `db:"authority_key_identifier"`
-	Body   string    `db:"body"`
+	// Serial is the certificate serial number as a decimal string. It is the
+	// algorithm-independent correlation key for an OCSP status lookup.
+	Serial string `db:"serial_number"`
+	// AKI is the authority key identifier of the issuing CA as a lowercase hex
+	// string, recorded under the convention of the record's producer. See the
+	// type comment above.
+	AKI string `db:"authority_key_identifier"`
+	// Body is the DER-encoded, pre-signed OCSP response.
+	Body string `db:"body"`
+	// Expiry is when the cached response stops being considered current.
 	Expiry time.Time `db:"expiry"`
 }
 
@@ -82,6 +100,15 @@ type Accessor interface {
 	RevokeCertificate(serial, aki string, reasonCode int) error
 	InsertOCSP(rr OCSPRecord) error
 	GetOCSP(serial, aki string) ([]OCSPRecord, error)
+	// GetOCSPBySerial retrieves every OCSPRecord carrying serial, regardless of
+	// the authority key identifier convention each record was stored under.
+	// OCSP request hash algorithms vary between clients (RFC 6960 allows
+	// SHA-1/SHA-256/SHA-384/SHA-512 CertIDs), so the request's issuer key hash
+	// cannot be used to correlate against records keyed by a producer-specific
+	// AKI; the serial number is the stable, hash-independent correlation key.
+	// When several records share a serial (for example during key re-issuance),
+	// all of them are returned and the caller selects the current one.
+	GetOCSPBySerial(serial string) ([]OCSPRecord, error)
 	GetUnexpiredOCSPs() ([]OCSPRecord, error)
 	UpdateOCSP(serial, aki, body string, expiry time.Time) error
 	UpsertOCSP(serial, aki, body string, expiry time.Time) error
